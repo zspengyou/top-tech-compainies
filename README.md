@@ -1,5 +1,6 @@
 # Top Tech Companies
 
+
 A companiesmarketcap.com-style site that ranks the top 200 technology companies by
 **market cap**, **earnings**, and **revenue**. Within any category you can re-sort
 by any column; the Rank column always reflects the category. Built with Next.js
