@@ -1,0 +1,38 @@
+name: Refresh data
+
+# Refreshes the FMP snapshot into Upstash Redis on a schedule, independent of
+# Vercel (no function time limit, and not subject to Hobby's once/day cron cap).
+#
+# Each run is cheap (~100 FMP requests) thanks to batching + reuse, so two runs a
+# day stays within the FMP free tier (250/day). Use the "Run workflow" button
+# (workflow_dispatch) to fire extra runs while seeding the cold-start backfill.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   FMP_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+
+on:
+  schedule:
+    - cron: "0 14,21 * * *" # 14:00 & 21:00 UTC (~2x/day)
+  workflow_dispatch: {}
+
+# Avoid overlapping runs writing the snapshot at the same time.
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run refresh:local
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
