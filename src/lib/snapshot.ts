@@ -12,9 +12,15 @@
 
 import type { Company, PricePoint, Snapshot } from "@/lib/types";
 import { getSnapshot } from "@/lib/store";
-import { TECH_UNIVERSE } from "@/config/universe";
+import { EXTRA_TICKERS, SEED_UNIVERSE, TECH_SCREEN, UNIVERSE_SIZE } from "@/config/universe";
 import { dedupe, mapPool, num, pickRolling, shiftDate, today } from "@/lib/util";
-import { fetchHistory, fetchProfile, fetchQuotes, type YahooProfile } from "@/lib/yahoo";
+import {
+  fetchHistory,
+  fetchProfile,
+  fetchQuotes,
+  fetchTechUniverse,
+  type YahooProfile,
+} from "@/lib/yahoo";
 import { fetchFundamentals, type SecFundamentals } from "@/lib/sec";
 
 // Concurrency for per-symbol fetches (Yahoo chart / profile, SEC facts). Kept modest
@@ -22,8 +28,6 @@ import { fetchFundamentals, type SecFundamentals } from "@/lib/sec";
 const POOL = 6;
 // Rolling history kept this many days (covers the 30-day lookback + slack).
 const HISTORY_DAYS = 45;
-// Optional cap on universe size (0 = all). Handy for a quick first run.
-const UNIVERSE_LIMIT = Number(process.env.UNIVERSE_LIMIT ?? 0);
 
 export type RefreshOptions = {
   // Max symbols whose SEC fundamentals (revenue/earnings) are re-fetched this run.
@@ -80,7 +84,17 @@ export async function buildSnapshot(options: RefreshOptions = {}): Promise<Snaps
   const prevBySymbol = new Map<string, Company>((prev?.companies ?? []).map((c) => [c.symbol, c]));
   const priceHistory: Record<string, PricePoint[]> = { ...(prev?.priceHistory ?? {}) };
 
-  const symbols = UNIVERSE_LIMIT > 0 ? TECH_UNIVERSE.slice(0, UNIVERSE_LIMIT) : [...TECH_UNIVERSE];
+  // Discover the universe dynamically (top by market cap). If the screener is
+  // unavailable, fall back to the previous snapshot's symbols so the site doesn't
+  // shrink; on a cold start with neither, use the small static seed.
+  const discovered = await fetchTechUniverse(TECH_SCREEN, UNIVERSE_SIZE);
+  const base =
+    discovered.length >= 20
+      ? discovered
+      : prev && prev.companies.length > 0
+        ? prev.companies.map((c) => c.symbol)
+        : SEED_UNIVERSE;
+  const symbols = dedupe([...base, ...EXTRA_TICKERS]);
 
   // Phase 1 (priority): batched Yahoo quotes for every symbol.
   const quotes = await fetchQuotes(symbols);

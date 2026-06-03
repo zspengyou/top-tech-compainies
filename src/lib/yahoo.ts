@@ -200,6 +200,92 @@ export async function fetchProfile(symbol: string): Promise<YahooProfile | undef
 // Exposed for callers that want to seed a from/to window if needed later.
 export const historyWindow = () => ({ from: shiftDate(today(), -95), to: today() });
 
+// --- Universe discovery (Yahoo screener) ---------------------------------------
+//
+// Dynamically discovers the tech universe by market cap, so rankings track the
+// market instead of a frozen hand-maintained list. Filters to real US exchanges
+// and de-dupes dual-class lines (e.g. GOOG vs GOOGL) by company name, keeping the
+// higher-market-cap line (results are market-cap sorted, so the first one seen).
+
+type ScreenerQuote = {
+  symbol?: string;
+  exchange?: string;
+  shortName?: string;
+  longName?: string;
+};
+
+const REAL_EXCHANGES = new Set(["NMS", "NYQ", "NGM", "ASE"]); // Nasdaq / NYSE / NYSE American
+
+// A screen term: match a whole sector or a single industry.
+export type ScreenTerm = { field: "sector" | "industry"; value: string };
+
+async function screenerPage(
+  sess: { cookie: string; crumb: string },
+  terms: ScreenTerm[],
+  offset: number,
+  size: number,
+): Promise<ScreenerQuote[]> {
+  const query = {
+    operator: "AND",
+    operands: [
+      { operator: "EQ", operands: ["region", "us"] },
+      { operator: "or", operands: terms.map((t) => ({ operator: "EQ", operands: [t.field, t.value] })) },
+    ],
+  };
+  const body = {
+    size,
+    offset,
+    sortField: "intradaymarketcap",
+    sortType: "DESC",
+    quoteType: "EQUITY",
+    query,
+    userId: "",
+    userIdType: "guid",
+  };
+  const url = `${Q1}/v1/finance/screener?crumb=${encodeURIComponent(sess.crumb)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "User-Agent": UA, Cookie: sess.cookie, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    finance?: { result?: Array<{ quotes?: ScreenerQuote[] }> };
+  };
+  return data.finance?.result?.[0]?.quotes ?? [];
+}
+
+// Returns up to `size` US tech tickers, market-cap descending. Empty on failure.
+export async function fetchTechUniverse(terms: ScreenTerm[], size: number): Promise<string[]> {
+  const sess = await getSession();
+  if (!sess) return [];
+  const out: string[] = [];
+  const seenSymbol = new Set<string>();
+  const seenName = new Set<string>();
+  for (let offset = 0; offset < 3000 && out.length < size; offset += 250) {
+    let quotes: ScreenerQuote[];
+    try {
+      quotes = await screenerPage(sess, terms, offset, 250);
+    } catch {
+      break;
+    }
+    if (quotes.length === 0) break;
+    for (const q of quotes) {
+      if (out.length >= size) break;
+      const s = q.symbol ?? "";
+      if (!REAL_EXCHANGES.has(q.exchange ?? "") || !/^[A-Z]{1,5}$/.test(s) || seenSymbol.has(s)) {
+        continue;
+      }
+      const name = (q.shortName ?? q.longName ?? "").trim();
+      if (name && seenName.has(name)) continue; // dual-class / duplicate company
+      seenSymbol.add(s);
+      if (name) seenName.add(name);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
 // --- Key statistics (single symbol, for the detail page) -----------------------
 //
 // Pulls the rich quoteSummary modules behind a Yahoo "key statistics" page and maps

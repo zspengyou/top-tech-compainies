@@ -10,8 +10,9 @@ export const CATEGORIES: CategoryDef[] = [
 
 export const DEFAULT_CATEGORY: CategoryId = "market-cap";
 
-// Number of ranked companies shown per category.
-export const TOP_N = 200;
+// Number of ranked companies shown per category. Configurable via RANKING_LIMIT
+// (default 200). Keep it <= UNIVERSE_SIZE (the discovered candidate pool).
+export const TOP_N = Number(process.env.RANKING_LIMIT ?? 200);
 
 export function getCategory(id: string): CategoryDef | undefined {
   return CATEGORIES.find((c) => c.id === id);

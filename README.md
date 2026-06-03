@@ -83,9 +83,14 @@ column" trivial.
 
 ### The universe (`src/config/universe.ts`)
 
-There's no free tech-sector screener, so the universe is a **static curated list** of
-~200 tickers. Ranking is data-driven (by market cap / revenue / earnings), so the
-order in the file doesn't matter — only membership. Add or remove tickers there.
+The universe is **discovered dynamically** each refresh from Yahoo's screener (top
+companies by market cap), so the rankings track the market instead of going stale on a
+hand-maintained list. What's configured is only the *definition* of "technology" — the
+whole Technology sector plus a few cross-sector industries where Yahoo files big tech
+(Alphabet/Meta under *Internet Content*, Amazon under *Internet Retail*). That taxonomy
+is stable; the company list isn't. Dual-class lines (GOOG vs GOOGL) are de-duped by
+company name, keeping the higher-cap one. A tiny `SEED_UNIVERSE` is only a cold-start
+fallback used if the screener is unreachable and there's no prior snapshot.
 
 ## Configuration (env vars)
 
@@ -93,8 +98,9 @@ All optional — the app runs keyless with sensible defaults.
 
 | Var | Default | Purpose |
 | --- | --- | --- |
+| `RANKING_LIMIT` | `200` | How many ranked companies each category page shows. Raise to e.g. `500`. |
+| `UNIVERSE_SIZE` | `600` | Size of the candidate pool discovered each refresh. Keep ≥ `RANKING_LIMIT`. |
 | `SEC_USER_AGENT` | a built-in default | SEC asks for a `name email` contact string. URLs/parentheses trip its WAF — keep it plain. |
-| `UNIVERSE_LIMIT` | `0` (all) | Cap the refresh to the first N symbols (handy for a quick run). |
 | `CRON_SECRET` | — | Bearer token the deployed `/api/cron/refresh` route requires. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | — | Snapshot store. Falls back to `data/snapshot.json` when unset. (`KV_REST_API_*` also accepted.) |
 
