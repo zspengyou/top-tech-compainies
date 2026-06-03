@@ -40,8 +40,13 @@ export type Snapshot = {
   // --- internal refresh state (not rendered) ---
   // Rolling per-symbol price history, newest-first, capped to ~45 days.
   priceHistory?: Record<string, PricePoint[]>;
-  // Rotating cursor so each run refreshes a different slice of fundamentals.
+  // Per-symbol TTM EPS, so P/E can be recomputed from the fresh price each run
+  // without a per-symbol fundamentals call.
+  ttmEps?: Record<string, number>;
+  // Rotating cursors so each run refreshes a different slice of income statements
+  // / profiles, spreading the per-symbol cost across days.
   fundamentalsCursor?: number;
+  profileCursor?: number;
 };
 
 // A company row with the rank it holds *within a given category*.

@@ -1,47 +1,57 @@
 import type { Company, PricePoint, Snapshot } from "@/lib/types";
 import { getSnapshot } from "@/lib/store";
+import { TECH_UNIVERSE } from "@/config/universe";
 
-// Financial Modeling Prep provider, tuned for the FREE tier (250 requests/day).
+// Financial Modeling Prep provider, tuned for the current FREE tier.
 //
-// Strategy to stay under budget:
-//  - One screener call seeds the universe (name, marketCap, sector, industry,
-//    country, price, dividend).
-//  - Quotes are fetched in BATCHES, not per symbol (P/E + 1-day change).
-//  - 5d/30d change comes from a rolling price history stored in the snapshot;
-//    today's price is already in hand, so steady-state cost is ~0 calls.
-//  - Fundamentals (revenue, earnings, employees, forward P/E) change rarely, so
-//    we REUSE them from the previous snapshot and only re-fetch a bounded,
-//    rotating subset (plus brand-new symbols) each run.
+// The free tier has NO batch or screener endpoints (they return HTTP 402) — every
+// call is single-symbol — and a ~250 request/day cap. Strategy:
 //
-// A typical run costs ~screener(1) + quotes(~6) + bounded backfills, well under
-// the daily cap.
+//  - Universe is a STATIC curated list (src/config/universe.ts); no screener call.
+//  - Each run prices every symbol with one `quote` call -> price, 1-day change,
+//    market cap, name. This is the bulk of the budget (~200 calls).
+//  - 5d/30d change comes from a rolling price history stored in the snapshot; the
+//    quote already gives today's price, so steady-state cost is ~0. New/uncovered
+//    symbols are seeded from `historical-price-eod/light` (1 call, full series).
+//  - P/E (TTM), revenue, earnings, employees, country/industry/sector, dividend
+//    come from `income-statement` + `profile`. These change quarterly/rarely, so we
+//    REUSE them from the previous snapshot and only re-fetch a bounded, rotating
+//    subset (plus brand-new symbols) each run. EPS is stored and P/E is recomputed
+//    from the fresh price every run, so P/E stays current without a daily call.
+//  - A daily-budget guard stops issuing calls before the cap, so a run never errors
+//    out mid-way; whatever wasn't refreshed this run is reused and picked up next run.
 
 const BASE = process.env.FMP_BASE ?? "https://financialmodelingprep.com/stable";
 
-// Pull a buffer above TOP_N (200) so each category still has >=200 rows after
-// dropping companies missing that metric.
-const UNIVERSE_SIZE = 240;
-
-// Batch size for /batch-quote (symbols per request).
-const QUOTE_CHUNK = 50;
-// Concurrency for the per-symbol backfills.
+// Concurrency for single-symbol fetches.
 const POOL = 6;
 // Rolling history is kept this many days (covers the 30-day lookback + slack).
 const HISTORY_DAYS = 45;
+// Hard ceiling on FMP calls per run. The free tier is ~250/day; we leave a little
+// slack. Quotes are issued first (fresh prices are the priority); the remainder of
+// the budget feeds the rotating fundamentals + history backfill.
+const DAILY_BUDGET = Number(process.env.FMP_DAILY_BUDGET ?? 245);
+// Optional cap on how many universe symbols to process (0 = all). Useful for a
+// quick, cheap first look: FMP_UNIVERSE_LIMIT=25 prices only the first 25 symbols.
+const UNIVERSE_LIMIT = Number(process.env.FMP_UNIVERSE_LIMIT ?? 0);
 
 export type RefreshOptions = {
-  // Max symbols whose fundamentals (income/profile/estimates) are re-fetched
-  // this run. Reuse covers the rest. Use Infinity for a full local backfill.
+  // Max symbols whose income statement (revenue/earnings/EPS) is re-fetched this
+  // run. Reuse covers the rest. Use Infinity for a full local backfill.
   maxFundamentalSymbols?: number;
+  // Max symbols whose profile (country/industry/sector/employees/dividend) is
+  // fetched. These are nearly static, so this is mostly brand-new symbols.
+  maxProfileSymbols?: number;
   // Max symbols to seed/repair price history via the historical endpoint.
   maxHistoryBackfill?: number;
-  // Forward P/E needs analyst estimates (premium on free tier). Off by default.
+  // Forward P/E needs analyst estimates (premium). Off by default.
   fetchEstimates?: boolean;
 };
 
 const DEFAULTS: Required<RefreshOptions> = {
-  maxFundamentalSymbols: 50,
-  maxHistoryBackfill: 50,
+  maxFundamentalSymbols: 15,
+  maxProfileSymbols: 15,
+  maxHistoryBackfill: 15,
   fetchEstimates: process.env.FMP_FETCH_ESTIMATES === "true",
 };
 
@@ -51,7 +61,17 @@ function apiKey(): string {
   return key;
 }
 
+// Thrown when the per-run budget is exhausted; callers treat it as "stop this phase
+// and reuse prior data" rather than a hard failure.
+class BudgetExceeded extends Error {}
+let callsThisRun = 0;
+
 async function fmpGet<T>(path: string, params: Record<string, string | number> = {}): Promise<T> {
+  if (callsThisRun >= DAILY_BUDGET) {
+    throw new BudgetExceeded(`FMP daily budget (${DAILY_BUDGET}) reached`);
+  }
+  callsThisRun++;
+
   const url = new URL(`${BASE}${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
   url.searchParams.set("apikey", apiKey());
@@ -64,23 +84,26 @@ async function fmpGet<T>(path: string, params: Record<string, string | number> =
   return (await res.json()) as T;
 }
 
-async function mapPool<I, O>(items: I[], limit: number, fn: (item: I) => Promise<O>): Promise<O[]> {
-  const out: O[] = new Array(items.length);
+// Run `fn` over items with bounded concurrency. Stops early (leaving remaining
+// items untouched) once the budget is exhausted.
+async function mapPool<I>(items: I[], limit: number, fn: (item: I) => Promise<void>): Promise<void> {
   let cursor = 0;
+  let stopped = false;
   async function worker() {
-    while (cursor < items.length) {
+    while (cursor < items.length && !stopped) {
       const i = cursor++;
-      out[i] = await fn(items[i]);
+      try {
+        await fn(items[i]);
+      } catch (err) {
+        if (err instanceof BudgetExceeded) {
+          stopped = true;
+          return;
+        }
+        throw err;
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
 }
 
 // Take `count` items from `arr` starting at `start`, wrapping around. Returns the
@@ -116,37 +139,40 @@ function shiftDate(isoDate: string, days: number): string {
 
 // --- Endpoint shapes (only the fields we use) ----------------------------------
 
-type ScreenerRow = {
-  symbol: string;
-  companyName?: string;
-  marketCap?: number;
-  sector?: string;
-  industry?: string;
-  country?: string;
-  price?: number;
-  lastAnnualDividend?: number;
-};
-
 type QuoteRow = {
   symbol: string;
+  name?: string;
   price?: number;
   marketCap?: number;
-  pe?: number;
-  changePercentage?: number; // stable
-  changesPercentage?: number; // legacy
+  changePercentage?: number;
 };
 
 type HistoryPoint = { date: string; close?: number; price?: number };
-type IncomeRow = { revenue?: number; netIncome?: number };
-type ProfileRow = { fullTimeEmployees?: number | string; lastDiv?: number };
+type IncomeRow = { revenue?: number; netIncome?: number; eps?: number; epsDiluted?: number };
+type ProfileRow = {
+  companyName?: string;
+  country?: string;
+  industry?: string;
+  sector?: string;
+  fullTimeEmployees?: number | string;
+  lastDividend?: number;
+};
 type EstimateRow = { date: string; epsAvg?: number; estimatedEpsAvg?: number };
 
-// What we reuse from the previous snapshot per symbol.
+// Slowly-changing data reused from the previous snapshot per symbol.
 type Fundamentals = {
   revenue: number | null;
   earnings: number | null;
-  employees: number | null;
+  ttmEps: number | null; // for computing P/E from the fresh price
   forwardPe: number | null;
+};
+type ProfileInfo = {
+  name: string | null;
+  country: string | null;
+  industry: string | null;
+  sector: string | null;
+  employees: number | null;
+  dividendPerShare: number | null; // annualized
 };
 
 // --- Price-history helpers (the rolling 5d/30d source) -------------------------
@@ -175,35 +201,17 @@ function historyCovers(series: PricePoint[], days: number): boolean {
   return oldest.d <= shiftDate(series[0].d, -days);
 }
 
-// --- Fetchers ------------------------------------------------------------------
+// --- Fetchers (all single-symbol on the free tier) -----------------------------
 
-async function screenTechUniverse(): Promise<ScreenerRow[]> {
-  const rows = await fmpGet<ScreenerRow[]>("/company-screener", {
-    sector: "Technology",
-    isActivelyTrading: "true",
-    isEtf: "false",
-    isFund: "false",
-    marketCapMoreThan: 1_000_000_000,
-    limit: UNIVERSE_SIZE,
-  });
-  return rows
-    .filter((r) => r.symbol)
-    .sort((a, b) => (b.marketCap ?? 0) - (a.marketCap ?? 0))
-    .slice(0, UNIVERSE_SIZE);
-}
-
-// Batched quotes: one request per QUOTE_CHUNK symbols instead of one per symbol.
-async function fetchQuotes(symbols: string[]): Promise<Map<string, QuoteRow>> {
-  const map = new Map<string, QuoteRow>();
-  for (const group of chunk(symbols, QUOTE_CHUNK)) {
-    try {
-      const rows = await fmpGet<QuoteRow[]>("/batch-quote", { symbols: group.join(",") });
-      for (const r of rows ?? []) if (r.symbol) map.set(r.symbol, r);
-    } catch {
-      // Skip this chunk; affected symbols fall back to screener price.
-    }
+async function fetchQuote(symbol: string): Promise<QuoteRow | undefined> {
+  try {
+    const rows = await fmpGet<QuoteRow[]>("/quote", { symbol });
+    return rows?.[0];
+  } catch (err) {
+    if (err instanceof BudgetExceeded) throw err;
+    // Free tier 402s on symbols outside its whitelist — drop them, don't crash.
+    return undefined;
   }
-  return map;
 }
 
 async function fetchHistorySeries(symbol: string): Promise<PricePoint[]> {
@@ -215,45 +223,68 @@ async function fetchHistorySeries(symbol: string): Promise<PricePoint[]> {
     );
     const history = Array.isArray(raw) ? raw : (raw.historical ?? []);
     return history
-      .map((h) => ({ d: h.date, p: (h.close ?? h.price) as number }))
+      .map((h) => ({ d: h.date, p: (h.price ?? h.close) as number }))
       .filter((pt) => pt.d && Number.isFinite(pt.p))
       .sort((a, b) => (a.d < b.d ? 1 : a.d > b.d ? -1 : 0));
-  } catch {
+  } catch (err) {
+    if (err instanceof BudgetExceeded) throw err;
     return [];
   }
 }
 
-async function fetchFundamentals(symbol: string, price: number, fetchEstimates: boolean): Promise<Fundamentals> {
-  const incomeP = fmpGet<IncomeRow[]>("/income-statement", { symbol, period: "annual", limit: 1 })
+async function fetchIncome(symbol: string, fetchEstimates: boolean, price: number): Promise<Fundamentals | undefined> {
+  const income = await fmpGet<IncomeRow[]>("/income-statement", { symbol, period: "annual", limit: 1 })
     .then((rows) => rows?.[0])
-    .catch(() => undefined);
-  const profileP = fmpGet<ProfileRow[]>("/profile", { symbol })
-    .then((rows) => rows?.[0])
-    .catch(() => undefined);
-  const estimatesP = fetchEstimates
-    ? fmpGet<EstimateRow[]>("/analyst-estimates", { symbol, period: "annual", limit: 8 })
-        .then((rows) => rows)
-        .catch(() => undefined)
-    : Promise.resolve(undefined);
-
-  const [income, profile, estimates] = await Promise.all([incomeP, profileP, estimatesP]);
+    .catch((err) => {
+      if (err instanceof BudgetExceeded) throw err;
+      return undefined;
+    });
+  // No data (paywalled/quota/unknown symbol) -> signal failure so the caller keeps
+  // the previous snapshot's values instead of overwriting them with nulls.
+  if (!income) return undefined;
 
   let forwardPe: number | null = null;
-  if (estimates && estimates.length) {
-    const now = Date.now();
-    const future = estimates
-      .filter((r) => r.date && new Date(r.date).getTime() >= now)
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    const next = future[0] ?? estimates[estimates.length - 1];
-    const eps = num(next?.epsAvg ?? next?.estimatedEpsAvg);
-    if (eps != null && eps > 0) forwardPe = price / eps;
+  if (fetchEstimates) {
+    const estimates = await fmpGet<EstimateRow[]>("/analyst-estimates", { symbol, period: "annual", limit: 8 })
+      .catch((err) => {
+        if (err instanceof BudgetExceeded) throw err;
+        return undefined;
+      });
+    if (estimates && estimates.length) {
+      const now = Date.now();
+      const future = estimates
+        .filter((r) => r.date && new Date(r.date).getTime() >= now)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      const next = future[0] ?? estimates[estimates.length - 1];
+      const eps = num(next?.epsAvg ?? next?.estimatedEpsAvg);
+      if (eps != null && eps > 0) forwardPe = price / eps;
+    }
   }
 
   return {
     revenue: num(income?.revenue),
     earnings: num(income?.netIncome),
-    employees: num(profile?.fullTimeEmployees),
+    ttmEps: num(income?.eps ?? income?.epsDiluted),
     forwardPe,
+  };
+}
+
+async function fetchProfile(symbol: string): Promise<ProfileInfo | undefined> {
+  const profile = await fmpGet<ProfileRow[]>("/profile", { symbol })
+    .then((rows) => rows?.[0])
+    .catch((err) => {
+      if (err instanceof BudgetExceeded) throw err;
+      return undefined;
+    });
+  if (!profile) return undefined;
+  const lastDiv = num(profile.lastDividend);
+  return {
+    name: profile.companyName ?? null,
+    country: profile.country ?? null,
+    industry: profile.industry ?? null,
+    sector: profile.sector ?? null,
+    employees: num(profile.fullTimeEmployees),
+    dividendPerShare: lastDiv != null ? lastDiv * 4 : null, // annualize a quarterly payout (approx.)
   };
 }
 
@@ -261,92 +292,124 @@ async function fetchFundamentals(symbol: string, price: number, fetchEstimates: 
 
 export async function buildSnapshot(options: RefreshOptions = {}): Promise<Snapshot> {
   const opts = { ...DEFAULTS, ...options };
+  callsThisRun = 0;
 
   // Reuse everything we can from the last run.
   const prev = await getSnapshot();
   const prevBySymbol = new Map<string, Company>((prev?.companies ?? []).map((c) => [c.symbol, c]));
+  const prevEps: Record<string, number> = prev?.ttmEps ?? {};
   const priceHistory: Record<string, PricePoint[]> = { ...(prev?.priceHistory ?? {}) };
 
-  // Cheap, every run: universe + batched quotes.
-  const universe = await screenTechUniverse();
-  const symbols = universe.map((r) => r.symbol);
-  const quotes = await fetchQuotes(symbols);
+  const symbols = UNIVERSE_LIMIT > 0 ? TECH_UNIVERSE.slice(0, UNIVERSE_LIMIT) : [...TECH_UNIVERSE];
 
-  // Decide which symbols re-fetch fundamentals this run: brand-new symbols first,
-  // then a rotating slice of the rest (bounded by budget). The rest are reused.
-  const missing = symbols.filter((s) => {
+  // Phase 1 (priority): fresh quote for every symbol. Budget guard may cut this
+  // short on a constrained day; uncovered symbols fall back to prior price/cap.
+  const quotes = new Map<string, QuoteRow>();
+  await mapPool(symbols, POOL, async (symbol) => {
+    const q = await fetchQuote(symbol);
+    if (q) quotes.set(symbol, q);
+  });
+
+  const priceOf = (symbol: string): number | null =>
+    num(quotes.get(symbol)?.price) ?? (prevBySymbol.get(symbol)?.price ?? null);
+
+  // Phase 2: rotating income-statement refresh. Brand-new / missing symbols first,
+  // then a rolling slice of the rest. The cursor rotates across runs.
+  const missingFund = symbols.filter((s) => {
     const p = prevBySymbol.get(s);
     return !p || p.revenue == null || p.earnings == null;
   });
-  const { items: rolled, next } = pickRolling(
+  const { items: rolledFund, next: fundCursor } = pickRolling(
     symbols,
     prev?.fundamentalsCursor ?? 0,
     opts.maxFundamentalSymbols,
   );
-  const fundamentalTargets = new Set<string>(missing);
-  for (const s of rolled) fundamentalTargets.add(s);
-  const fundamentalList = [...fundamentalTargets].slice(0, opts.maxFundamentalSymbols);
+  const fundList = dedupe([...missingFund, ...rolledFund]).slice(0, opts.maxFundamentalSymbols);
+  const freshFund = new Map<string, Fundamentals>();
+  await mapPool(fundList, POOL, async (symbol) => {
+    const f = await fetchIncome(symbol, opts.fetchEstimates, priceOf(symbol) ?? 0);
+    if (f) freshFund.set(symbol, f);
+  });
 
-  // Decide which symbols need price-history seeding/repair (bounded).
+  // Phase 3: profiles for symbols still missing static labels (mostly new symbols),
+  // then a small rotating slice to refresh employees/dividend over time.
+  const missingProfile = symbols.filter((s) => {
+    const p = prevBySymbol.get(s);
+    return !p || !p.country || !p.industry;
+  });
+  const { items: rolledProfile, next: profileCursor } = pickRolling(
+    symbols,
+    prev?.profileCursor ?? 0,
+    opts.maxProfileSymbols,
+  );
+  const profileList = dedupe([...missingProfile, ...rolledProfile]).slice(0, opts.maxProfileSymbols);
+  const freshProfile = new Map<string, ProfileInfo>();
+  await mapPool(profileList, POOL, async (symbol) => {
+    const info = await fetchProfile(symbol);
+    if (info) freshProfile.set(symbol, info);
+  });
+
+  // Phase 4: seed/repair rolling price history for uncovered symbols (bounded).
   const historyTargets = symbols
     .filter((s) => !historyCovers(priceHistory[s] ?? [], 30))
     .slice(0, opts.maxHistoryBackfill);
-
-  // Resolve price now (needed for forward P/E + history append) for every symbol.
-  const priceOf = (row: ScreenerRow) =>
-    num(quotes.get(row.symbol)?.price) ?? num(row.price);
-
-  // Backfill the bounded subsets concurrently.
-  const fundamentalsBySymbol = new Map<string, Fundamentals>();
-  await mapPool(fundamentalList, POOL, async (symbol) => {
-    const row = universe.find((r) => r.symbol === symbol)!;
-    const price = priceOf(row) ?? 0;
-    fundamentalsBySymbol.set(symbol, await fetchFundamentals(symbol, price, opts.fetchEstimates));
-  });
   await mapPool(historyTargets, POOL, async (symbol) => {
     const seeded = await fetchHistorySeries(symbol);
     if (seeded.length) priceHistory[symbol] = seeded;
   });
 
+  // --- Assemble ---------------------------------------------------------------
   const dateStr = today();
+  const ttmEps: Record<string, number> = { ...prevEps };
   const companies: Company[] = [];
-  for (const row of universe) {
-    const symbol = row.symbol;
+
+  for (const symbol of symbols) {
     const quote = quotes.get(symbol);
     const prevC = prevBySymbol.get(symbol);
 
-    const price = priceOf(row);
-    const marketCap = num(quote?.marketCap) ?? num(row.marketCap);
-    if (price == null || marketCap == null) continue; // required fields
+    const price = priceOf(symbol);
+    const marketCap = num(quote?.marketCap) ?? (prevC?.marketCap ?? null);
+    if (price == null || marketCap == null) continue; // required fields; reuse handles most
 
-    // Append today's price to the rolling history, then derive 5d/30d.
-    const series = appendPrice(priceHistory[symbol] ?? [], dateStr, price);
+    // Rolling history -> 5d/30d. Only append a fresh quote price (not a reused one).
+    let series = priceHistory[symbol] ?? [];
+    if (quote && num(quote.price) != null) series = appendPrice(series, dateStr, price);
     priceHistory[symbol] = series;
 
-    // Fundamentals: freshly fetched this run, else reused from the last snapshot.
-    const fresh = fundamentalsBySymbol.get(symbol);
-    const revenue = fresh ? fresh.revenue : (prevC?.revenue ?? null);
-    const earnings = fresh ? fresh.earnings : (prevC?.earnings ?? null);
-    const employees = fresh ? fresh.employees : (prevC?.employees ?? null);
-    const forwardPe = fresh ? fresh.forwardPe : (prevC?.forwardPe ?? null);
+    // Fundamentals: fresh this run, else reused from the previous snapshot.
+    const fund = freshFund.get(symbol);
+    const revenue = fund ? fund.revenue : (prevC?.revenue ?? null);
+    const earnings = fund ? fund.earnings : (prevC?.earnings ?? null);
+    const forwardPe = fund ? fund.forwardPe : (prevC?.forwardPe ?? null);
+    const eps = fund?.ttmEps ?? prevEps[symbol] ?? null;
+    if (eps != null) ttmEps[symbol] = eps;
+    // P/E recomputed from the FRESH price each run (eps changes only quarterly).
+    const peRatio = eps != null && eps > 0 ? price / eps : (prevC?.peRatio ?? null);
 
-    // Dividend yield straight from the screener (no extra call).
-    const lastDiv = num(row.lastAnnualDividend);
-    const dividendYield = lastDiv != null ? (lastDiv / price) * 100 : (prevC?.dividendYield ?? null);
+    // Profile (static labels): fresh this run, else reused.
+    const prof = freshProfile.get(symbol);
+    const name = prof?.name ?? prevC?.name ?? quote?.name ?? symbol;
+    const country = prof?.country ?? prevC?.country ?? "";
+    const industry = prof?.industry ?? prevC?.industry ?? "";
+    const sector = prof?.sector ?? prevC?.sector ?? "";
+    const employees = prof?.employees ?? prevC?.employees ?? null;
+    const divPerShare = prof?.dividendPerShare ?? null;
+    const dividendYield =
+      divPerShare != null ? (divPerShare / price) * 100 : (prevC?.dividendYield ?? null);
 
     companies.push({
       symbol,
-      name: row.companyName ?? prevC?.name ?? symbol,
+      name,
       logoUrl: logoUrl(symbol),
-      country: row.country ?? prevC?.country ?? "",
-      industry: row.industry ?? prevC?.industry ?? "",
-      sector: row.sector ?? prevC?.sector ?? "",
+      country,
+      industry,
+      sector,
       price,
       marketCap,
-      peRatio: num(quote?.pe) ?? (prevC?.peRatio ?? null),
+      peRatio,
       revenue,
       earnings,
-      change1d: num(quote?.changePercentage ?? quote?.changesPercentage),
+      change1d: num(quote?.changePercentage) ?? (prevC?.change1d ?? null),
       change5d: pctChange(series, 5),
       change30d: pctChange(series, 30),
       forwardPe,
@@ -355,15 +418,22 @@ export async function buildSnapshot(options: RefreshOptions = {}): Promise<Snaps
     });
   }
 
-  // Drop history for symbols that left the universe, to keep the store small.
+  // Drop history/eps for symbols no longer in the universe, to keep the store small.
   const live = new Set(symbols);
   for (const key of Object.keys(priceHistory)) if (!live.has(key)) delete priceHistory[key];
+  for (const key of Object.keys(ttmEps)) if (!live.has(key)) delete ttmEps[key];
 
   return {
     companies,
     generatedAt: new Date().toISOString(),
     baseCurrency: "USD",
     priceHistory,
-    fundamentalsCursor: next,
+    ttmEps,
+    fundamentalsCursor: fundCursor,
+    profileCursor,
   };
+}
+
+function dedupe<T>(arr: T[]): T[] {
+  return [...new Set(arr)];
 }
