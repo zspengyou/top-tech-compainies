@@ -14,7 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <div className="mx-auto max-w-7xl px-4 py-4">
             <h1 className="text-xl font-semibold tracking-tight">Top Tech Companies</h1>
             <p className="text-sm text-gray-500">
-              Ranked by market cap, earnings, and revenue · data from Financial Modeling Prep
+              Ranked by market cap, earnings, and revenue · data from Yahoo Finance &amp; SEC EDGAR
             </p>
           </div>
         </header>

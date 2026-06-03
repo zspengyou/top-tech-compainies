@@ -199,3 +199,172 @@ export async function fetchProfile(symbol: string): Promise<YahooProfile | undef
 
 // Exposed for callers that want to seed a from/to window if needed later.
 export const historyWindow = () => ({ from: shiftDate(today(), -95), to: today() });
+
+// --- Key statistics (single symbol, for the detail page) -----------------------
+//
+// Pulls the rich quoteSummary modules behind a Yahoo "key statistics" page and maps
+// them into display-ready sections. Yahoo pre-formats most numbers (a `.fmt` string
+// like "7.30B" / "19.08%"), so we render those directly and fall back to the raw.
+
+export type StatRow = { label: string; value: string };
+export type StatSection = { title: string; rows: StatRow[] };
+export type StockDetail = {
+  symbol: string;
+  name: string;
+  exchange: string | null;
+  currency: string | null;
+  price: number | null;
+  change: number | null; // signed, for color
+  priceFmt: string;
+  changeFmt: string;
+  changePercentFmt: string;
+  summary: string | null;
+  website: string | null;
+  hq: string | null;
+  sections: StatSection[];
+};
+
+// A Yahoo value is either a plain string/number or a { raw, fmt } wrapper.
+function asRawFmt(x: unknown): { raw?: unknown; fmt?: string } | undefined {
+  if (x && typeof x === "object" && ("raw" in x || "fmt" in x)) {
+    return x as { raw?: unknown; fmt?: string };
+  }
+  return undefined;
+}
+function fmtVal(x: unknown): string {
+  const v = asRawFmt(x);
+  if (v) {
+    if (typeof v.fmt === "string" && v.fmt !== "") return v.fmt;
+    if (v.raw != null) return String(v.raw);
+    return "—";
+  }
+  if (typeof x === "string" && x !== "") return x;
+  if (typeof x === "number" && Number.isFinite(x)) return String(x);
+  return "—";
+}
+function rawNum(x: unknown): number | null {
+  const v = asRawFmt(x);
+  const n = v ? v.raw : x;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+const str = (x: unknown): string | null => (typeof x === "string" && x !== "" ? x : null);
+
+export async function fetchKeyStats(symbol: string): Promise<StockDetail | undefined> {
+  const sess = await getSession();
+  if (!sess) return undefined;
+  const modules = "price,summaryDetail,defaultKeyStatistics,financialData,assetProfile";
+  const url =
+    `${Q1}/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${modules}` +
+    `&crumb=${encodeURIComponent(sess.crumb)}`;
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": UA, Cookie: sess.cookie } });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as {
+      quoteSummary?: { result?: Array<Record<string, Record<string, unknown>>> };
+    };
+    const r = data.quoteSummary?.result?.[0];
+    if (!r) return undefined;
+    const p = r.price ?? {};
+    const s = r.summaryDetail ?? {};
+    const k = r.defaultKeyStatistics ?? {};
+    const f = r.financialData ?? {};
+    const a = r.assetProfile ?? {};
+    const row = (label: string, x: unknown): StatRow => ({ label, value: fmtVal(x) });
+    const hq = [str(a.city), str(a.state), str(a.country)].filter(Boolean).join(", ");
+
+    const sections: StatSection[] = [
+      {
+        title: "Valuation Measures",
+        rows: [
+          row("Market Cap", p.marketCap ?? s.marketCap),
+          row("Enterprise Value", k.enterpriseValue),
+          row("Trailing P/E", s.trailingPE),
+          row("Forward P/E", k.forwardPE ?? s.forwardPE),
+          row("PEG Ratio", k.pegRatio),
+          row("Price/Sales (ttm)", s.priceToSalesTrailing12Months),
+          row("Price/Book", k.priceToBook),
+          row("Enterprise Value/Revenue", k.enterpriseToRevenue),
+          row("Enterprise Value/EBITDA", k.enterpriseToEbitda),
+        ],
+      },
+      {
+        title: "Financial Highlights",
+        rows: [
+          row("Profit Margin", f.profitMargins),
+          row("Operating Margin (ttm)", f.operatingMargins),
+          row("Return on Assets (ttm)", f.returnOnAssets),
+          row("Return on Equity (ttm)", f.returnOnEquity),
+          row("Revenue (ttm)", f.totalRevenue),
+          row("Revenue Per Share (ttm)", f.revenuePerShare),
+          row("Quarterly Revenue Growth (yoy)", f.revenueGrowth),
+          row("Gross Profit (ttm)", f.grossProfits),
+          row("EBITDA", f.ebitda),
+          row("Net Income to Common (ttm)", k.netIncomeToCommon),
+          row("Diluted EPS (ttm)", k.trailingEps),
+          row("Quarterly Earnings Growth (yoy)", k.earningsQuarterlyGrowth),
+        ],
+      },
+      {
+        title: "Balance Sheet & Cash Flow",
+        rows: [
+          row("Total Cash (mrq)", f.totalCash),
+          row("Total Cash Per Share (mrq)", f.totalCashPerShare),
+          row("Total Debt (mrq)", f.totalDebt),
+          row("Total Debt/Equity (mrq)", f.debtToEquity),
+          row("Current Ratio (mrq)", f.currentRatio),
+          row("Book Value Per Share (mrq)", k.bookValue),
+          row("Operating Cash Flow (ttm)", f.operatingCashflow),
+          row("Levered Free Cash Flow (ttm)", f.freeCashflow),
+        ],
+      },
+      {
+        title: "Trading Information",
+        rows: [
+          row("Beta (5Y Monthly)", k.beta ?? s.beta),
+          row("52-Week Change", k["52WeekChange"]),
+          row("52 Week High", s.fiftyTwoWeekHigh),
+          row("52 Week Low", s.fiftyTwoWeekLow),
+          row("50-Day Moving Average", s.fiftyDayAverage),
+          row("200-Day Moving Average", s.twoHundredDayAverage),
+          row("Avg Volume (3m)", s.averageVolume),
+          row("Shares Outstanding", k.sharesOutstanding),
+          row("Float", k.floatShares),
+          row("% Held by Insiders", k.heldPercentInsiders),
+          row("% Held by Institutions", k.heldPercentInstitutions),
+          row("Shares Short", k.sharesShort),
+          row("Short Ratio", k.shortRatio),
+        ],
+      },
+      {
+        title: "Dividends & Splits",
+        rows: [
+          row("Forward Annual Dividend Rate", s.dividendRate),
+          row("Forward Annual Dividend Yield", s.dividendYield),
+          row("Trailing Annual Dividend Rate", s.trailingAnnualDividendRate),
+          row("Trailing Annual Dividend Yield", s.trailingAnnualDividendYield),
+          row("Payout Ratio", s.payoutRatio),
+          row("Ex-Dividend Date", s.exDividendDate),
+        ],
+      },
+    ];
+
+    const name = str(p.longName) ?? str(p.shortName) ?? symbol;
+    return {
+      symbol,
+      name,
+      exchange: str(p.exchangeName),
+      currency: str(p.currency),
+      price: rawNum(p.regularMarketPrice),
+      change: rawNum(p.regularMarketChange),
+      priceFmt: fmtVal(p.regularMarketPrice),
+      changeFmt: fmtVal(p.regularMarketChange),
+      changePercentFmt: fmtVal(p.regularMarketChangePercent),
+      summary: str(a.longBusinessSummary),
+      website: str(a.website),
+      hq: hq || null,
+      sections,
+    };
+  } catch {
+    return undefined;
+  }
+}
