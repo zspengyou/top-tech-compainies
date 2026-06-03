@@ -12,7 +12,7 @@
 
 const FULL_UNIVERSE: string[] = [
   // Mega & large cap
-  "AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "AVGO", "TSM", "ORCL",
+  "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "AVGO", "TSM", "ORCL",
   "CRM", "AMD", "ADBE", "SAP", "ASML", "CSCO", "ACN", "TXN", "QCOM", "INTU",
   "IBM", "AMAT", "NOW", "ARM", "MU", "ADI", "LRCX", "KLAC", "PANW", "SNPS",
   "CDNS", "ANET", "INTC", "APH", "MRVL", "CRWD", "MSI", "ADSK", "FTNT", "ROP",
@@ -40,5 +40,6 @@ const FULL_UNIVERSE: string[] = [
   "DXC", "G", "EXLS", "CNXC", "DOX", "UI",
 ];
 
-// Deduped (GOOGL/GOOG etc. are intentional separate listings; exact dupes removed).
+// One ticker per company — dual-class lines (e.g. Alphabet's GOOG vs GOOGL) are
+// pruned in the list above so a company isn't double-counted in the rankings.
 export const TECH_UNIVERSE: string[] = [...new Set(FULL_UNIVERSE)];
