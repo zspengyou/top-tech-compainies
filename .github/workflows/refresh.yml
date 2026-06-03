@@ -1,18 +1,18 @@
 name: Refresh data
 
-# Refreshes the FMP snapshot into Upstash Redis on a schedule, independent of
-# Vercel (no function time limit, and not subject to Hobby's once/day cron cap).
+# Refreshes the Yahoo + SEC snapshot into Upstash Redis on a schedule, independent
+# of Vercel (no function time limit, and not subject to Hobby's once/day cron cap).
 #
-# Each run is cheap (~100 FMP requests) thanks to batching + reuse, so two runs a
-# day stays within the FMP free tier (250/day). Use the "Run workflow" button
-# (workflow_dispatch) to fire extra runs while seeding the cold-start backfill.
+# Data sources are keyless, so no API key is needed — just the Upstash secrets to
+# write the snapshot. Use the "Run workflow" button (workflow_dispatch) for extras.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
-#   FMP_API_KEY, UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+#   UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN
+#   (optional) SEC_USER_AGENT — your "name email" contact for SEC requests
 
 on:
   schedule:
-    - cron: "0 14,21 * * *" # 14:00 & 21:00 UTC (~2x/day)
+    - cron: "0 14 * * *" # 14:00 UTC daily
   workflow_dispatch: {}
 
 # Avoid overlapping runs writing the snapshot at the same time.
@@ -33,6 +33,6 @@ jobs:
       - run: npm ci
       - run: npm run refresh:local
         env:
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}

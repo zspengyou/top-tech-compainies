@@ -1,27 +1,31 @@
 // Populate the local snapshot (data/snapshot.json) without deploying.
-//   npm run refresh:local            # incremental: cheap, reuses prior fundamentals
-//   npm run refresh:local -- --full  # backfill ALL fundamentals + history (heavy)
+//   npm run refresh:local            # incremental: cheap, reuses prior data
+//   npm run refresh:local -- --full  # backfill ALL fundamentals + history (cold start)
 //
-// Reads FMP_API_KEY from .env.local. When Upstash env vars are set it writes
-// there instead (same code path as the cron job).
+// Data comes from Yahoo Finance + SEC EDGAR — both keyless, so no API key is needed.
+// When Upstash env vars are set it writes there instead (same path as the cron job).
 //
-// NOTE: the free FMP tier allows 250 requests/day. A `--full` cold start needs
-// more than that, so it self-heals across days — re-run it after the daily reset
-// (3PM EST) until every company has fundamentals + price history.
+// A `--full` run fetches SEC fundamentals + Yahoo history for every symbol; an
+// incremental run reuses those and only re-prices + rotates a small slice. Run
+// `--full` once to seed, then incremental keeps it fresh.
 
 import { config } from "dotenv";
 config({ path: ".env.local" });
 
-import { buildSnapshot, type RefreshOptions } from "../src/lib/fmp";
+import { buildSnapshot, type RefreshOptions } from "../src/lib/snapshot";
 import { setSnapshot } from "../src/lib/store";
 
 async function main() {
   const full = process.argv.includes("--full");
   const opts: RefreshOptions = full
-    ? { maxFundamentalSymbols: Infinity, maxHistoryBackfill: Infinity }
+    ? {
+        maxFundamentalSymbols: Infinity,
+        maxProfileSymbols: Infinity,
+        maxHistoryBackfill: Infinity,
+      }
     : {};
 
-  console.log(`Building snapshot from FMP (${full ? "FULL backfill" : "incremental"})…`);
+  console.log(`Building snapshot from Yahoo + SEC (${full ? "FULL backfill" : "incremental"})…`);
   const start = Date.now();
   const snapshot = await buildSnapshot(opts);
   await setSnapshot(snapshot);
@@ -42,8 +46,8 @@ async function main() {
 
   if (withFund < snapshot.companies.length) {
     console.log(
-      `\n${snapshot.companies.length - withFund} companies still need fundamentals. ` +
-        `Re-run (incremental rotates through them, or use --full) after the daily reset.`,
+      `\n${snapshot.companies.length - withFund} companies have no USD revenue+earnings ` +
+        `(foreign filers report IFRS/non-USD and are left blank by design).`,
     );
   }
 }

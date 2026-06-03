@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { buildSnapshot } from "@/lib/fmp";
+import { buildSnapshot } from "@/lib/snapshot";
 import { setSnapshot } from "@/lib/store";
 
 // Vercel Cron hits this on a schedule (see vercel.json). It sends

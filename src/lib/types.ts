@@ -25,7 +25,7 @@ export type Company = {
   dividendYield: number | null; // percent, e.g. 0.55 means 0.55%
   employees: number | null; // full-time employees
 
-  // --- add more here, then populate in fmp.ts + add a column to show ---
+  // --- add more here, then populate in snapshot.ts + add a column to show ---
 };
 
 // One stored daily price point, used to compute 5d/30d change without
@@ -40,11 +40,8 @@ export type Snapshot = {
   // --- internal refresh state (not rendered) ---
   // Rolling per-symbol price history, newest-first, capped to ~45 days.
   priceHistory?: Record<string, PricePoint[]>;
-  // Per-symbol TTM EPS, so P/E can be recomputed from the fresh price each run
-  // without a per-symbol fundamentals call.
-  ttmEps?: Record<string, number>;
-  // Rotating cursors so each run refreshes a different slice of income statements
-  // / profiles, spreading the per-symbol cost across days.
+  // Rotating cursors so each run refreshes a different slice of SEC fundamentals
+  // / Yahoo profiles, spreading the per-symbol cost across runs.
   fundamentalsCursor?: number;
   profileCursor?: number;
 };

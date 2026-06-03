@@ -2,7 +2,7 @@ import type { ColumnDef } from "@/lib/types";
 
 // The table renders exactly these columns, in order. To add a column:
 //   1) add the field to `Company` in src/lib/types.ts
-//   2) populate it in src/lib/fmp.ts
+//   2) populate it in src/lib/snapshot.ts (from Yahoo or SEC)
 //   3) add an entry here
 // No table/component changes required.
 export const COLUMNS: ColumnDef[] = [

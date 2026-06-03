@@ -1,25 +1,14 @@
 // Static curated universe of large/mid-cap technology tickers.
 //
-// WHY STATIC: FMP's free tier no longer includes the company-screener endpoint
-// (HTTP 402), so we can't discover the universe at refresh time. This hand-curated
-// list replaces it. Ranking is still data-driven — each refresh prices these
-// symbols and sorts by market cap / revenue / earnings — so the ORDER here does
-// not matter, only membership.
+// WHY STATIC: the free data sources (Yahoo, SEC) have no tech-sector screener, so
+// the universe is hand-curated rather than discovered at refresh time. Ranking is
+// still data-driven — each refresh prices these symbols and sorts by market cap /
+// revenue / earnings — so the ORDER here does not matter, only membership.
 //
-// MAINTENANCE: add or remove tickers here to change the universe. Every symbol
-// costs one `quote` call per refresh, and the free tier caps at ~250 calls/day, so
-// keep this around ~200. Invalid/delisted symbols simply return no quote and are
-// dropped (their slot is wasted, so prune them when noticed).
-
-// Symbols FMP's FREE tier actually returns a /quote for (verified 2026-06-02 by
-// scanning the whole list — everything else 402s on free). Listed first so
-// FMP_UNIVERSE_LIMIT=N picks accessible names. The full list below is kept for a
-// future paid tier, where the screener/batch endpoints unlock the rest.
-export const FMP_FREE_TIER: string[] = [
-  "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSM", "AMD", "ADBE", "CSCO",
-  "INTC", "PLTR", "NOK", "BIDU", "BABA", "SHOP", "NFLX", "UBER", "PINS", "SNAP",
-  "RBLX", "DOCU", "ZM", "HOOD", "COIN", "PYPL", "SOFI",
-];
+// MAINTENANCE: add or remove tickers here to change the universe. Yahoo prices every
+// symbol each run (batched, cheap); SEC fundamentals + Yahoo history are reused and
+// only refreshed in a rotating slice, so a large list stays inexpensive. Invalid/
+// delisted symbols simply return no quote and are dropped — prune them when noticed.
 
 const FULL_UNIVERSE: string[] = [
   // Mega & large cap
@@ -51,6 +40,5 @@ const FULL_UNIVERSE: string[] = [
   "DXC", "G", "EXLS", "CNXC", "DOX", "UI",
 ];
 
-// Free-tier-accessible symbols first, then the rest (deduped). Order only affects
-// which symbols a FMP_UNIVERSE_LIMIT prefix selects; ranking is always by metric.
-export const TECH_UNIVERSE: string[] = [...new Set([...FMP_FREE_TIER, ...FULL_UNIVERSE])];
+// Deduped (GOOGL/GOOG etc. are intentional separate listings; exact dupes removed).
+export const TECH_UNIVERSE: string[] = [...new Set(FULL_UNIVERSE)];
