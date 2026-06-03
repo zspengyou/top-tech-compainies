@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { CATEGORIES, getCategory } from "@/config/categories";
+import { CATEGORIES, getCategory, TOP_N } from "@/config/categories";
 import { COLUMNS } from "@/config/columns";
 import { rankByCategory } from "@/lib/rank";
 import { getSnapshot } from "@/lib/store";
@@ -35,20 +35,21 @@ export default async function CategoryPage({
     );
   }
 
-  const rows = rankByCategory(snapshot.companies, category);
+  // Rank the entire universe; the client decides how many to show (default TOP_N).
+  const rows = rankByCategory(snapshot.companies, category, Infinity);
 
   return (
     <>
       <CategoryTabs active={category.id} />
       <div className="mb-3 flex items-baseline justify-between">
         <h2 className="text-lg font-semibold">
-          Top {rows.length} tech companies by {category.label.toLowerCase()}
+          Top tech companies by {category.label.toLowerCase()}
         </h2>
         <p className="text-xs text-gray-400">
           Updated {new Date(snapshot.generatedAt).toLocaleString()}
         </p>
       </div>
-      <CompanyTable rows={rows} columns={COLUMNS} />
+      <CompanyTable rows={rows} columns={COLUMNS} defaultLimit={TOP_N} />
     </>
   );
 }

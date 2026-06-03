@@ -6,31 +6,42 @@ import { renderCell } from "@/components/cells";
 
 type SortState = { key: keyof RankedRow; dir: "asc" | "desc" };
 
-// Compare helper: nulls always sort last; numbers numerically; strings locale-wise.
-function compare(a: unknown, b: unknown): number {
+// Compare two non-null values: numbers numerically; strings locale-wise.
+function compareValues(a: unknown, b: unknown): number {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b));
+}
+
+// Direction-aware comparator: nulls always sort last, regardless of dir.
+function compare(a: unknown, b: unknown, dir: "asc" | "desc"): number {
   const aNull = a == null || a === "";
   const bNull = b == null || b === "";
   if (aNull && bNull) return 0;
   if (aNull) return 1;
   if (bNull) return -1;
-  if (typeof a === "number" && typeof b === "number") return a - b;
-  return String(a).localeCompare(String(b));
+  const c = compareValues(a, b);
+  return dir === "desc" ? -c : c;
 }
 
 export function CompanyTable({
   rows,
   columns,
+  defaultLimit = 200,
 }: {
   rows: RankedRow[];
   columns: ColumnDef[];
+  defaultLimit?: number;
 }) {
   // Default view: category order (by the precomputed rank).
   const [sort, setSort] = useState<SortState>({ key: "rank", dir: "asc" });
+  // How many rows to show. `rows` arrives ranked, so we keep the top N by rank
+  // and then sort that subset by whatever column the user picks.
+  const [limit, setLimit] = useState(defaultLimit);
 
   const sorted = useMemo(() => {
-    const out = [...rows].sort((a, b) => compare(a[sort.key], b[sort.key]));
-    return sort.dir === "desc" ? out.reverse() : out;
-  }, [rows, sort]);
+    const top = rows.slice(0, Math.max(0, limit));
+    return top.sort((a, b) => compare(a[sort.key], b[sort.key], sort.dir));
+  }, [rows, sort, limit]);
 
   function onHeaderClick(column: ColumnDef) {
     if (!column.sortable) return;
@@ -45,7 +56,24 @@ export function CompanyTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+    <>
+      <div className="mb-2 flex items-center justify-end gap-2 text-xs text-gray-500">
+        <label htmlFor="row-limit">Show</label>
+        <input
+          id="row-limit"
+          type="number"
+          min={1}
+          max={rows.length}
+          value={limit}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            setLimit(Number.isFinite(n) && n > 0 ? Math.min(n, rows.length) : 0);
+          }}
+          className="w-20 rounded border border-gray-300 px-2 py-1 text-right text-gray-700 focus:border-gray-400 focus:outline-none"
+        />
+        <span>of {rows.length}</span>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
       <table className="min-w-full border-collapse text-sm">
         <thead>
           <tr className="border-b border-gray-200 bg-gray-50 text-gray-500">
@@ -89,6 +117,7 @@ export function CompanyTable({
           ))}
         </tbody>
       </table>
-    </div>
+      </div>
+    </>
   );
 }
