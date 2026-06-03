@@ -13,7 +13,7 @@ import { config } from "dotenv";
 config({ path: ".env.local" });
 
 import { buildSnapshot, type RefreshOptions } from "../src/lib/snapshot";
-import { setSnapshot } from "../src/lib/store";
+import { setSnapshot, storeTarget } from "../src/lib/store";
 
 async function main() {
   const full = process.argv.includes("--full");
@@ -25,6 +25,10 @@ async function main() {
       }
     : {};
 
+  // Writes to Upstash Redis when its REST credentials are present in the
+  // environment (so this updates the same store Vercel reads, no cron needed);
+  // otherwise falls back to the local data/snapshot.json file.
+  console.log(`Target store: ${storeTarget()}`);
   console.log(`Building snapshot from Yahoo + SEC (${full ? "FULL backfill" : "incremental"})…`);
   const start = Date.now();
   const snapshot = await buildSnapshot(opts);

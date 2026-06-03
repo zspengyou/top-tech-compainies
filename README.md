@@ -39,10 +39,19 @@ fundamentals/profiles, and rotates a small slice of them):
 npm run refresh:local
 ```
 
-A `--full` cold start takes ~30s (SEC requests are throttled to respect its ~10 req/s
-limit). Runs are resilient: if a source rate-limits or errors on a symbol, that
-symbol keeps its previous values and is retried next run — a refresh never half-writes
-or crashes.
+A `--full` cold start takes ~90s for the full ~600-company pool (SEC requests are
+throttled to respect its ~10 req/s limit). Runs are resilient: if a source
+rate-limits or errors on a symbol, that symbol keeps its previous values and is
+retried next run — a refresh never half-writes or crashes.
+
+**Updating production from your machine.** `refresh:local` writes to **Upstash Redis
+whenever its REST credentials are present in the environment** — the same store Vercel
+reads — otherwise it writes `data/snapshot.json`. So if your `.env.local` has the
+Upstash vars (e.g. pulled via `vercel env pull`), running `npm run refresh:local`
+updates the live site directly, no cron required. The command prints its target
+(`Target store: Upstash Redis (…)` vs `local file (…)`) so you can confirm. The
+snapshot is gzip-compressed in Redis (~1.3MB JSON → ~270KB) to stay under Upstash's
+1MB request limit.
 
 ## How it works
 
